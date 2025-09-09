@@ -3,8 +3,6 @@ Pillow==10.4.0
 numpy==1.26.4
 moviepy==1.0.3
 imageio-ffmpeg==0.4.9
-# TTS options
 openai>=1.30.0
 gTTS==2.5.3
-# pyttsx3 is optional; avoid on Streamlit Cloud
 pyttsx3==2.90

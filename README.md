@@ -73,3 +73,8 @@ api_key = "sk-..."
 ```
 
 The app auto-detects the key from any of these.
+
+
+### Update (build 2025-09-09 16:45 IST)
+- Fixed MoviePy audio write error by letting MoviePy infer codec from extension (no explicit `codec=`).
+- Added robust OpenAI key detection and safe fallback to gTTS.
