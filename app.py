@@ -59,7 +59,17 @@ def tts_save_openai(text: str, out_path: str, voice: str = "alloy"):
     """
     if not OPENAI_AVAILABLE or not os.getenv("OPENAI_API_KEY"):
         raise RuntimeError("OpenAI TTS unavailable: install openai and set OPENAI_API_KEY.")
-    client = OpenAI()
+    # Read API key from env or Streamlit secrets
+    api_key = os.getenv("OPENAI_API_KEY")
+    try:
+        import streamlit as _st
+        if not api_key:
+            api_key = _st.secrets.get("OPENAI_API_KEY", _st.secrets.get("openai_api_key", None))
+    except Exception:
+        pass
+    if not api_key:
+        raise RuntimeError("OpenAI TTS unavailable: install openai and set OPENAI_API_KEY in env or Streamlit secrets.")
+    client = OpenAI(api_key=api_key)
     # Prefer a modern TTS model; fallback if necessary
     model_candidates = ["gpt-4o-mini-tts", "tts-1"]
     last_err = None
@@ -332,7 +342,17 @@ def render_outro_frame(bg_img: Optional[Image.Image], size=(1080,1920), show_gui
 def generate_quiz_via_openai(topic: str, difficulty: str) -> Tuple[str, List[str], int, str]:
     if not OPENAI_AVAILABLE or not os.getenv("OPENAI_API_KEY"):
         raise RuntimeError("OpenAI not available. Set OPENAI_API_KEY and install openai>=1.0.")
-    client = OpenAI()
+    # Read API key from env or Streamlit secrets
+    api_key = os.getenv("OPENAI_API_KEY")
+    try:
+        import streamlit as _st
+        if not api_key:
+            api_key = _st.secrets.get("OPENAI_API_KEY", _st.secrets.get("openai_api_key", None))
+    except Exception:
+        pass
+    if not api_key:
+        raise RuntimeError("OpenAI TTS unavailable: install openai and set OPENAI_API_KEY in env or Streamlit secrets.")
+    client = OpenAI(api_key=api_key)
     sys_prompt = "You are a quiz writer. Return JSON with keys: question, options (4 items), correct_index (0-3), explanation (1-2 sentences)."
     user_prompt = f"Create one multiple-choice question about '{topic}' at {difficulty} difficulty. Do not add extra keys."
     resp = client.chat.completions.create(

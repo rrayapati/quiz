@@ -44,3 +44,7 @@ streamlit run app.py
 - Output MP4 uses **H.264 + AAC**, ready for YouTube Shorts.
 
 Enjoy! 🎉
+
+
+## Streamlit Secrets Setup
+In Streamlit Cloud, set a secret named `OPENAI_API_KEY` (or `openai_api_key`). The app will read either and pass it to the OpenAI SDK explicitly.
