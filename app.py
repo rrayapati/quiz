@@ -13,15 +13,30 @@ import numpy as np
 from moviepy.editor import ImageSequenceClip, AudioFileClip, CompositeAudioClip, concatenate_audioclips
 import imageio_ffmpeg
 
-# Offline TTS (works on Windows/Mac/Linux with system voices)
-import pyttsx3
-
-# Optional: OpenAI for question generation (only used if API key is provided and user chooses it)
+# --- TTS options ---
+# 1) OpenAI TTS (best for cloud if OPENAI_API_KEY is set)
+OPENAI_AVAILABLE = False
 try:
     from openai import OpenAI
     OPENAI_AVAILABLE = True
 except Exception:
     OPENAI_AVAILABLE = False
+
+# 2) gTTS (works in cloud without system voices; requires internet)
+GTTS_AVAILABLE = False
+try:
+    from gtts import gTTS
+    GTTS_AVAILABLE = True
+except Exception:
+    GTTS_AVAILABLE = False
+
+# 3) pyttsx3 (offline on local machines with system voices; NOT reliable on Streamlit Cloud)
+PYTTSX3_AVAILABLE = False
+try:
+    import pyttsx3
+    PYTTSX3_AVAILABLE = True
+except Exception:
+    PYTTSX3_AVAILABLE = False
 
 # -----------------------------
 # Utility: Fonts
@@ -31,50 +46,101 @@ def load_font(size: int) -> ImageFont.FreeTypeFont:
     Load a reasonable default font. We attempt DejaVuSans if present, otherwise fall back to PIL default.
     """
     try:
-        # DejaVuSans is commonly available in many Linux environments
         return ImageFont.truetype("DejaVuSans-Bold.ttf", size=size)
     except Exception:
         return ImageFont.load_default()
 
 # -----------------------------
-# TTS helpers
+# TTS helpers (cloud-safe)
 # -----------------------------
-def tts_save(text: str, out_path: str, rate_delta: int = 0):
+def tts_save_openai(text: str, out_path: str, voice: str = "alloy"):
     """
-    Generate speech using pyttsx3 and save to WAV file.
-    rate_delta: change speaking rate (+/-)
+    Use OpenAI TTS to synthesize to MP3 (recommended on Streamlit Cloud).
+    """
+    if not OPENAI_AVAILABLE or not os.getenv("OPENAI_API_KEY"):
+        raise RuntimeError("OpenAI TTS unavailable: install openai and set OPENAI_API_KEY.")
+    client = OpenAI()
+    # Prefer a modern TTS model; fallback if necessary
+    model_candidates = ["gpt-4o-mini-tts", "tts-1"]
+    last_err = None
+    for model in model_candidates:
+        try:
+            # Stream response to file if supported; else simple create
+            try:
+                with client.audio.speech.with_streaming_response.create(
+                    model=model,
+                    voice=voice,
+                    input=text or ".",
+                    format="mp3"
+                ) as resp:
+                    resp.stream_to_file(out_path)
+                return
+            except Exception:
+                # older SDK path
+                audio_resp = client.audio.speech.create(
+                    model=model, voice=voice, input=text or ".", format="mp3"
+                )
+                with open(out_path, "wb") as f:
+                    f.write(audio_resp.read())
+                return
+        except Exception as e:
+            last_err = e
+            continue
+    raise RuntimeError(f"OpenAI TTS failed: {last_err}")
 
-    On some Linux environments pyttsx3 needs 'espeak' installed.
+def tts_save_gtts(text: str, out_path: str):
     """
+    Use gTTS to synthesize to MP3.
+    """
+    if not GTTS_AVAILABLE:
+        raise RuntimeError("gTTS not installed.")
+    tts = gTTS(text=text or ".", lang="en")
+    tts.save(out_path)
+
+def tts_save_pyttsx3(text: str, out_path: str, rate_delta: int = 0):
+    """
+    Use pyttsx3 to synthesize to WAV (local only; requires system voices like 'espeak' on Linux).
+    """
+    if not PYTTSX3_AVAILABLE:
+        raise RuntimeError("pyttsx3 not installed.")
     engine = pyttsx3.init()
-    # Adjust rate slightly for clarity
     rate = engine.getProperty("rate")
     engine.setProperty("rate", max(80, rate + rate_delta))
-    engine.save_to_file(text, out_path)
+    engine.save_to_file(text or ".", out_path)
     engine.runAndWait()
 
-def make_audio_for_segments(segments: List[Tuple[str, str]], tmpdir: str) -> Tuple[str, float]:
+def tts_save(text: str, out_path: str, mode: str, rate_delta: int = 0, voice: str = "alloy"):
+    """
+    Unified TTS wrapper.
+    mode: "openai" | "gtts" | "pyttsx3"
+    """
+    if mode == "openai":
+        return tts_save_openai(text, out_path, voice=voice)
+    elif mode == "gtts":
+        return tts_save_gtts(text, out_path)
+    elif mode == "pyttsx3":
+        return tts_save_pyttsx3(text, out_path, rate_delta=rate_delta)
+    else:
+        raise RuntimeError("Unknown TTS mode")
+
+def make_audio_for_segments(segments: List[Tuple[str, str]], tmpdir: str, tts_mode: str, rate_delta: int = 0, voice: str = "alloy") -> Tuple[str, float]:
     """
     segments: list of (label, text)
     Returns (audio_path, total_duration_seconds)
+    - For OpenAI/gTTS we create per-segment MP3s and concatenate.
+    - For pyttsx3 we create WAVs and concatenate.
     """
     audio_paths = []
+    ext = ".mp3" if tts_mode in ("openai", "gtts") else ".wav"
     for idx, (label, text) in enumerate(segments):
-        wav_path = os.path.join(tmpdir, f"seg_{idx:02d}_{label}.wav")
-        safe_text = text.strip() if text else ""
-        if not safe_text:
-            # Create a tiny silent gap
-            # We'll create 0.25s of silence by generating a blank audio file via moviepy workaround
-            # Easier: still call TTS with a dot (.) to keep timing consistent.
-            safe_text = "."
-        tts_save(safe_text, wav_path)
-        audio_paths.append(wav_path)
+        out = os.path.join(tmpdir, f"seg_{idx:02d}_{label}{ext}")
+        tts_save(text, out, mode=tts_mode, rate_delta=rate_delta, voice=voice)
+        audio_paths.append(out)
 
-    # Concatenate using moviepy
     clips = [AudioFileClip(p) for p in audio_paths]
     full = concatenate_audioclips(clips)
-    out_audio = os.path.join(tmpdir, "narration.wav")
-    full.write_audiofile(out_audio, fps=44100, codec="pcm_s16le", verbose=False, logger=None)
+    out_audio = os.path.join(tmpdir, f"narration{ext}")
+    full.write_audiofile(out_audio, fps=44100, codec="aac" if ext==".mp3" else "pcm_s16le", verbose=False, logger=None)
     dur = full.duration
     try:
         for c in clips:
@@ -87,24 +153,16 @@ def make_audio_for_segments(segments: List[Tuple[str, str]], tmpdir: str) -> Tup
 # Layout helpers
 # -----------------------------
 def draw_safe_guides(img: Image.Image, bottom_reserved_ratio: float = 0.25, content_top_ratio: float = 0.08, content_bottom_ratio: float = 0.70) -> Image.Image:
-    """
-    Draw guides: bottom 25% reserved. Content between ~8% and 70%
-    """
     w, h = img.size
     draw = ImageDraw.Draw(img, "RGBA")
-    # Bottom reserved overlay
     reserved_h = int(h * bottom_reserved_ratio)
     draw.rectangle([0, h - reserved_h, w, h], fill=(255, 0, 0, 40))
-    # Content box
     y1 = int(h * content_top_ratio)
     y2 = int(h * content_bottom_ratio)
     draw.rectangle([int(w*0.06), y1, int(w*0.94), y2], outline=(0, 255, 0, 160), width=4)
     return img
 
 def paste_centered(bg: Image.Image, overlay: Image.Image, box: Tuple[int, int, int, int]):
-    """
-    Paste overlay centered within box (left, top, right, bottom)
-    """
     l, t, r, b = box
     bw, bh = r - l, b - t
     ow, oh = overlay.size
@@ -117,9 +175,6 @@ def paste_centered(bg: Image.Image, overlay: Image.Image, box: Tuple[int, int, i
     return bg
 
 def text_wrap(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, max_width: int) -> List[str]:
-    """
-    Wrap text to fit max_width in pixels.
-    """
     words = text.split()
     lines = []
     if not words:
@@ -135,9 +190,6 @@ def text_wrap(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, m
     return lines
 
 def draw_text_block(img: Image.Image, text: str, font: ImageFont.ImageFont, xy: Tuple[int, int], fill=(255,255,255), max_width: Optional[int]=None, line_spacing_ratio: float=1.15) -> Tuple[int,int]:
-    """
-    Draw wrapped text at xy. Returns (w,h) drawn.
-    """
     draw = ImageDraw.Draw(img)
     if max_width is None:
         draw.text(xy, text, font=font, fill=fill)
@@ -162,9 +214,7 @@ def draw_text_block(img: Image.Image, text: str, font: ImageFont.ImageFont, xy: 
 def base_canvas(bg_image: Optional[Image.Image], size=(1080, 1920)) -> Image.Image:
     canvas = Image.new("RGB", size, (15, 15, 20))
     if bg_image:
-        # fill and blur slightly for legibility
         bg = bg_image.copy().convert("RGB").resize(size, Image.LANCZOS).filter(ImageFilter.GaussianBlur(radius=1.2))
-        # darken
         overlay = Image.new("RGBA", size, (0,0,0,110))
         bg = Image.alpha_composite(bg.convert("RGBA"), overlay).convert("RGB")
         canvas.paste(bg, (0,0))
@@ -176,13 +226,10 @@ def render_title_frame(bg_img: Optional[Image.Image], title: str, day: str, quiz
     title_font = load_font(80)
     meta_font = load_font(46)
 
-    # Title area (upper 20%)
     margin = int(w*0.06)
     top_box = (margin, int(h*0.08), w-margin, int(h*0.24))
     draw = ImageDraw.Draw(img)
-    # Title
     draw_text_block(img, title, title_font, (top_box[0], top_box[1]), fill=(255,255,255), max_width=(top_box[2]-top_box[0]))
-    # Day and Quiz No under it
     meta_text = f"{day} • {quiz_no}"
     draw_text_block(img, meta_text, meta_font, (top_box[0], top_box[1]+int((top_box[3]-top_box[1])*0.55)), fill=(220,220,220), max_width=(top_box[2]-top_box[0]))
 
@@ -195,7 +242,6 @@ def render_question_frame(bg_img: Optional[Image.Image], question_partial: str, 
     w, h = img.size
     if show_guides:
         img = draw_safe_guides(img)
-    # Content area
     content_box = (int(w*0.06), int(h*0.20), int(w*0.94), int(h*0.70))
     q_font = load_font(56)
     draw_text_block(img, question_partial, q_font, (content_box[0], content_box[1]), fill=(255,255,255), max_width=(content_box[2]-content_box[0]))
@@ -210,7 +256,6 @@ def render_options_frame(bg_img: Optional[Image.Image], question: str, options: 
     q_font = load_font(54)
     opt_font = load_font(48)
     draw_text_block(img, question, q_font, (content_box[0], content_box[1]), fill=(255,255,255), max_width=(content_box[2]-content_box[0]))
-    # Options area under question
     draw = ImageDraw.Draw(img, "RGBA")
     opt_y = int(h*0.36)
     opt_gap = int(h*0.06)
@@ -219,10 +264,8 @@ def render_options_frame(bg_img: Optional[Image.Image], question: str, options: 
         alpha = max(0.0, min(1.0, alphas[i] if i < len(alphas) else 1.0))
         fill = (255,255,255, int(255*alpha))
         label_fill = (180,220,255, int(255*alpha))
-        # Bullet
         draw.rounded_rectangle([content_box[0], opt_y-10, content_box[0]+48, opt_y+48], radius=10, fill=label_fill)
         draw_text_block(img, labels[i], opt_font, (content_box[0]+10, opt_y-2), fill=(20,30,40), max_width=None)
-        # Text
         draw.text((content_box[0]+64, opt_y), opt, font=opt_font, fill=fill)
         opt_y += opt_gap
     return img
@@ -247,16 +290,12 @@ def render_answer_frame(bg_img: Optional[Image.Image], question: str, options: L
         is_correct = (i == correct_idx)
         bg_col = (80, 200, 120, 220) if is_correct else (255,255,255,50)
         txt_col = (10,25,15) if is_correct else (255,255,255)
-        # Option box
         draw.rounded_rectangle([content_box[0], opt_y-16, content_box[2], opt_y+56], radius=16, fill=bg_col)
-        # Label
         draw.rounded_rectangle([content_box[0]+8, opt_y-6, content_box[0]+58, opt_y+44], radius=10, fill=(255,255,255,230) if is_correct else (180,220,255,160))
         draw_text_block(img, labels[i], opt_font, (content_box[0]+16, opt_y-2), fill=(10,25,15) if is_correct else (20,30,40))
-        # Text
         draw.text((content_box[0]+74, opt_y), opt, font=opt_font, fill=txt_col)
         opt_y += opt_gap
 
-    # Explanation under options
     exp_box_top = opt_y + int(h*0.02)
     exp_area = (content_box[0], exp_box_top, content_box[2], int(h*0.70))
     exp_text = f"Why: {explanation}"
@@ -291,10 +330,6 @@ def render_outro_frame(bg_img: Optional[Image.Image], size=(1080,1920), show_gui
 # OpenAI question generation (optional)
 # -----------------------------
 def generate_quiz_via_openai(topic: str, difficulty: str) -> Tuple[str, List[str], int, str]:
-    """
-    Returns (question, options[4], correct_idx, explanation).
-    Requires OPENAI_API_KEY env var and 'openai' package available.
-    """
     if not OPENAI_AVAILABLE or not os.getenv("OPENAI_API_KEY"):
         raise RuntimeError("OpenAI not available. Set OPENAI_API_KEY and install openai>=1.0.")
     client = OpenAI()
@@ -309,12 +344,10 @@ def generate_quiz_via_openai(topic: str, difficulty: str) -> Tuple[str, List[str
         temperature=0.7,
     )
     content = resp.choices[0].message.content
-    # attempt to parse JSON from content
     import json, re
     try:
         j = json.loads(content)
     except Exception:
-        # fallback: try to extract JSON block
         m = re.search(r"\{.*\}", content, re.S)
         if not m:
             raise RuntimeError("OpenAI response not JSON.")
@@ -331,7 +364,6 @@ def generate_quiz_via_openai(topic: str, difficulty: str) -> Tuple[str, List[str
 # Video assembly
 # -----------------------------
 def assemble_video(frames: List[Image.Image], audio_path: Optional[str], fps: int, out_path: str):
-    # Save frames to a list of numpy arrays
     arr_frames = [np.array(im.convert("RGB")) for im in frames]
     clip = ImageSequenceClip(arr_frames, fps=fps)
     if audio_path and os.path.exists(audio_path):
@@ -371,9 +403,10 @@ with st.expander("✍️ Question & Options", expanded=not auto_generate):
     correct_idx = st.selectbox("Correct Option", options=[0,1,2,3], format_func=lambda i: ["A","B","C","D"][i], index=0)
     explanation = st.text_area("Answer Explanation (1–2 lines)", value="Russia spans Eastern Europe and northern Asia, making it the world's largest country by area.")
 
-with st.expander("🔊 Voice-over", expanded=True):
-    rate_delta = st.slider("Voice Speed Adjustment", min_value=-60, max_value=60, value=-10, step=5, help="Negative = slower, Positive = faster")
-    st.caption("This MVP uses offline system voices via pyttsx3.")
+with st.expander("🔊 Voice-over (choose mode)", expanded=True):
+    tts_mode = st.selectbox("TTS Mode", options=["openai (cloud)", "gtts (cloud)", "pyttsx3 (local)"], index=0)
+    voice = st.text_input("Voice (OpenAI only)", value="alloy", help="For OpenAI TTS models.")
+    rate_delta = st.slider("Local voice speed (pyttsx3 only)", min_value=-60, max_value=60, value=-10, step=5)
 
 with st.expander("⚙️ Timing & Effects", expanded=True):
     fps = st.slider("FPS", 20, 40, 30, 1)
@@ -390,18 +423,15 @@ generate = st.button("🎥 Generate Video")
 
 if generate:
     try:
-        # Resolution
         if resolution.startswith("1080"):
             size = (1080, 1920)
         else:
             size = (720, 1280)
 
-        # Load background if provided
         bg_img = None
         if bg_file is not None:
             bg_img = Image.open(bg_file)
 
-        # Auto-generate via OpenAI if chosen
         if auto_generate:
             q, opts, ci, expl = generate_quiz_via_openai(topic, difficulty)
             question = q
@@ -411,73 +441,67 @@ if generate:
 
         options = [optA, optB, optC, optD]
 
-        # Prepare audio narration segments (title, question, options, answer+explanation, engagement, outro)
+        # Prepare audio narration segments
         segments = []
         segments.append(("title", f"{quiz_title}. {day_str}. {quiz_no}."))
         segments.append(("question", question))
         segments.append(("options", f"Option A: {optA}. Option B: {optB}. Option C: {optC}. Option D: {optD}."))
-        # The answer will be narrated with explanation
         answer_letter = ["A","B","C","D"][correct_idx]
         segments.append(("answer", f"The correct answer is {answer_letter}. {explanation}"))
         segments.append(("engage", "Now your turn. Comment your answer below."))
         segments.append(("outro", "Please like, share, and subscribe for more quiz videos."))
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            audio_path, total_audio = make_audio_for_segments(segments, tmpdir)
+        # Choose TTS mode
+        selected_mode = tts_mode.split()[0]  # "openai" | "gtts" | "pyttsx3"
 
-            # Build frames
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audio_path, total_audio = make_audio_for_segments(
+                segments, tmpdir, tts_mode=selected_mode, rate_delta=rate_delta, voice=voice
+            )
+
             frames: List[Image.Image] = []
 
-            # 1) Title hold
             title_frame = render_title_frame(bg_img, quiz_title, day_str, quiz_no, size=size, show_guides=show_guides)
             frames += [title_frame] * max(1, hold_title * fps)
 
-            # 2) Typing question frames
-            text = question
-            if len(text) == 0:
-                text = "."
-            # Build partials by stepping chars_per_frame
+            text = question or "."
             for i in range(1, len(text)+1, chars_per_frame):
                 partial = text[:i]
                 frames.append(render_question_frame(bg_img, partial, size=size, show_guides=show_guides))
 
-            # 3) Options fade-in
-            # Start with alphas [0,0,0,0], then fade-in each option sequentially
             alphas = [0.0, 0.0, 0.0, 0.0]
             for idx in range(4):
                 for f in range(option_fade_frames):
-                    # increase current option alpha
                     a = min(1.0, (f+1)/option_fade_frames)
                     cur = alphas.copy()
                     cur[idx] = a
                     frames.append(render_options_frame(bg_img, question, options, cur, size=size, show_guides=show_guides))
 
-            # Hold after all options visible
             frames += [render_options_frame(bg_img, question, options, [1.0,1.0,1.0,1.0], size=size, show_guides=show_guides)] * max(1, hold_after_options * fps)
 
-            # 4) Answer + explanation
             ans_frame = render_answer_frame(bg_img, question, options, correct_idx, explanation, size=size, show_guides=show_guides)
             frames += [ans_frame] * max(1, hold_answer * fps)
 
-            # 5) Engagement frame
             engage = render_engagement_frame(bg_img, size=size, show_guides=show_guides)
             frames += [engage] * max(1, hold_engage * fps)
 
-            # 6) Outro
             outro = render_outro_frame(bg_img, size=size, show_guides=show_guides)
             frames += [outro] * max(1, hold_outro * fps)
 
-            # Assemble video with audio
             out_name = f"quiz_video_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
             out_path = os.path.join(tmpdir, out_name)
-            assemble_video(frames, audio_path, fps, out_path)
+            arr_frames = [np.array(im.convert("RGB")) for im in frames]
+            clip = ImageSequenceClip(arr_frames, fps=fps)
+            if audio_path and os.path.exists(audio_path):
+                audio = AudioFileClip(audio_path)
+                clip = clip.set_audio(audio)
+            clip.write_videofile(out_path, fps=fps, codec="libx264", audio_codec="aac", preset="medium", threads=2, verbose=False, logger=None)
 
-            # Offer download
             with open(out_path, "rb") as f:
                 data = f.read()
             st.success("Video generated!")
             st.download_button("⬇️ Download MP4", data=data, file_name=out_name, mime="video/mp4")
 
     except Exception as e:
-        st.error(f"Error: {e}")
+        st.error(f"TTS/Video error: {e}")
         st.exception(e)
