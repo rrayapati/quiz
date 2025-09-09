@@ -48,3 +48,28 @@ Enjoy! 🎉
 
 ## Streamlit Secrets Setup
 In Streamlit Cloud, set a secret named `OPENAI_API_KEY` (or `openai_api_key`). The app will read either and pass it to the OpenAI SDK explicitly.
+
+
+---
+
+## Streamlit Secrets Examples
+
+Any of the following will work:
+
+**Flat key:**
+```toml
+OPENAI_API_KEY = "sk-..."
+```
+
+**alt casing:**
+```toml
+openai_api_key = "sk-..."
+```
+
+**Nested section:**
+```toml
+[openai]
+api_key = "sk-..."
+```
+
+The app auto-detects the key from any of these.

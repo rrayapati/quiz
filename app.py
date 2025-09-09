@@ -9,6 +9,26 @@ import streamlit as st
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 import numpy as np
 
+APP_BUILD = "2025-09-09T16:00+05:30"
+
+def _get_openai_api_key():
+    """Try multiple locations for the OpenAI API key: env, secrets (various casings), nested sections."""
+    key = os.getenv("OPENAI_API_KEY")
+    try:
+        import streamlit as _st
+        if not key:
+            key = _st.secrets.get("OPENAI_API_KEY", None)
+        if not key:
+            key = _st.secrets.get("openai_api_key", None)
+        if not key:
+            # Nested tables: [openai] api_key="..."
+            section = _st.secrets.get("openai", {})
+            if isinstance(section, dict):
+                key = section.get("api_key", None)
+    except Exception:
+        pass
+    return key
+
 # Video + audio
 from moviepy.editor import ImageSequenceClip, AudioFileClip, CompositeAudioClip, concatenate_audioclips
 import imageio_ffmpeg
@@ -59,15 +79,9 @@ def tts_save_openai(text: str, out_path: str, voice: str = "alloy"):
     """
 
     # Read API key from env or Streamlit secrets
-    api_key = os.getenv("OPENAI_API_KEY")
-    try:
-        import streamlit as _st
-        if not api_key:
-            api_key = _st.secrets.get("OPENAI_API_KEY", _st.secrets.get("openai_api_key", None))
-    except Exception:
-        pass
+    api_key = _get_openai_api_key()
     if not api_key:
-        raise RuntimeError("OpenAI TTS unavailable: install openai and set OPENAI_API_KEY in env or Streamlit secrets.")
+        raise RuntimeError("OpenAI TTS unavailable: no API key found. Set OPENAI_API_KEY in env or Streamlit secrets (OPENAI_API_KEY / openai_api_key or [openai].api_key).")
     client = OpenAI(api_key=api_key)
     # Prefer a modern TTS model; fallback if necessary
     model_candidates = ["gpt-4o-mini-tts", "tts-1"]
@@ -342,15 +356,9 @@ def generate_quiz_via_openai(topic: str, difficulty: str) -> Tuple[str, List[str
     if not OPENAI_AVAILABLE or not os.getenv("OPENAI_API_KEY"):
         raise RuntimeError("OpenAI not available. Set OPENAI_API_KEY and install openai>=1.0.")
     # Read API key from env or Streamlit secrets
-    api_key = os.getenv("OPENAI_API_KEY")
-    try:
-        import streamlit as _st
-        if not api_key:
-            api_key = _st.secrets.get("OPENAI_API_KEY", _st.secrets.get("openai_api_key", None))
-    except Exception:
-        pass
+    api_key = _get_openai_api_key()
     if not api_key:
-        raise RuntimeError("OpenAI TTS unavailable: install openai and set OPENAI_API_KEY in env or Streamlit secrets.")
+        raise RuntimeError("OpenAI TTS unavailable: no API key found. Set OPENAI_API_KEY in env or Streamlit secrets (OPENAI_API_KEY / openai_api_key or [openai].api_key).")
     client = OpenAI(api_key=api_key)
     sys_prompt = "You are a quiz writer. Return JSON with keys: question, options (4 items), correct_index (0-3), explanation (1-2 sentences)."
     user_prompt = f"Create one multiple-choice question about '{topic}' at {difficulty} difficulty. Do not add extra keys."
@@ -438,6 +446,16 @@ with st.expander("⚙️ Timing & Effects", expanded=True):
     hold_outro = st.slider("Hold Outro (seconds)", 1, 8, 3, 1)
 
 st.markdown("---")
+
+with st.expander("🔧 Diagnostics", expanded=False):
+    st.write(f"App build: **{APP_BUILD}**")
+    st.write(f"OpenAI SDK installed: **{OPENAI_AVAILABLE}**")
+    found_key = _get_openai_api_key() is not None
+    masked = (("..." + _get_openai_api_key()[-4:]) if _get_openai_api_key() else "None")
+    st.write(f"OpenAI key detected: **{found_key}** ({masked})")
+    st.write(f"gTTS available: **{GTTS_AVAILABLE}**")
+    st.write(f"pyttsx3 available: **{PYTTSX3_AVAILABLE}**")
+
 generate = st.button("🎥 Generate Video")
 
 if generate:
@@ -471,7 +489,10 @@ if generate:
         segments.append(("outro", "Please like, share, and subscribe for more quiz videos."))
 
         # Choose TTS mode
-        selected_mode = tts_mode.split()[0]  # "openai" | "gtts" | "pyttsx3"
+        selected_mode = tts_mode.split()[0]
+        if selected_mode == "openai" and _get_openai_api_key() is None:
+            st.warning("OpenAI API key not found. Falling back to gTTS (cloud). Add `OPENAI_API_KEY` in Streamlit Secrets to use OpenAI voices.")
+            selected_mode = "gtts"
 
         with tempfile.TemporaryDirectory() as tmpdir:
             audio_path, total_audio = make_audio_for_segments(
