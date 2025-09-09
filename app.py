@@ -57,8 +57,7 @@ def tts_save_openai(text: str, out_path: str, voice: str = "alloy"):
     """
     Use OpenAI TTS to synthesize to MP3 (recommended on Streamlit Cloud).
     """
-    if not OPENAI_AVAILABLE or not os.getenv("OPENAI_API_KEY"):
-        raise RuntimeError("OpenAI TTS unavailable: install openai and set OPENAI_API_KEY.")
+
     # Read API key from env or Streamlit secrets
     api_key = os.getenv("OPENAI_API_KEY")
     try:
