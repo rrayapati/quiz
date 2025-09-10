@@ -6,17 +6,9 @@ from typing import Tuple, List, Optional
 import streamlit as st
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 import numpy as np
-
 from moviepy.editor import ImageSequenceClip, AudioFileClip, concatenate_audioclips
 
-# --- Optional SDKs ---
-OPENAI_AVAILABLE = False
-try:
-    from openai import OpenAI
-    OPENAI_AVAILABLE = True
-except Exception:
-    OPENAI_AVAILABLE = False
-
+# gTTS for cloud-safe narration (toggleable)
 GTTS_AVAILABLE = False
 try:
     from gtts import gTTS
@@ -24,34 +16,11 @@ try:
 except Exception:
     GTTS_AVAILABLE = False
 
-PYTTSX3_AVAILABLE = False
-try:
-    import pyttsx3
-    PYTTSX3_AVAILABLE = True
-except Exception:
-    PYTTSX3_AVAILABLE = False
-
-APP_BUILD = "2025-09-09T16:45+05:30"
+APP_BUILD = "manual-only-2025-09-10T18:10+05:30"
 
 # -----------------------------
 # Utilities
 # -----------------------------
-def _get_openai_api_key() -> Optional[str]:
-    """Try env, secrets (flat), secrets (nested)"""
-    key = os.getenv("OPENAI_API_KEY")
-    try:
-        if not key:
-            key = st.secrets.get("OPENAI_API_KEY", None)
-        if not key:
-            key = st.secrets.get("openai_api_key", None)
-        if not key:
-            sect = st.secrets.get("openai", {})
-            if isinstance(sect, dict):
-                key = sect.get("api_key", None)
-    except Exception:
-        pass
-    return key
-
 def load_font(size: int) -> ImageFont.FreeTypeFont:
     try:
         return ImageFont.truetype("DejaVuSans-Bold.ttf", size=size)
@@ -101,83 +70,38 @@ def draw_safe_guides(img: Image.Image, bottom_reserved_ratio: float = 0.25, cont
     return img
 
 # -----------------------------
-# TTS
+# TTS (gTTS only, optional)
 # -----------------------------
-def tts_save_openai(text: str, out_path: str, voice: str = "alloy"):
-    if not OPENAI_AVAILABLE:
-        raise RuntimeError("OpenAI SDK not installed")
-    api_key = _get_openai_api_key()
-    if not api_key:
-        raise RuntimeError("OpenAI TTS unavailable: no API key found")
-    client = OpenAI(api_key=api_key)
-    for model in ["gpt-4o-mini-tts", "tts-1"]:
-        try:
-            with client.audio.speech.with_streaming_response.create(
-                model=model,
-                voice=voice,
-                input=text or ".",
-                format="mp3",
-            ) as resp:
-                resp.stream_to_file(out_path)
-            return
-        except Exception:
-            continue
-    raise RuntimeError("OpenAI TTS failed for all models")
-
 def tts_save_gtts(text: str, out_path: str):
     if not GTTS_AVAILABLE:
         raise RuntimeError("gTTS not installed")
     tts = gTTS(text=(text or "."), lang="en")
     tts.save(out_path)
 
-def tts_save_pyttsx3(text: str, out_path: str, rate_delta: int = 0):
-    if not PYTTSX3_AVAILABLE:
-        raise RuntimeError("pyttsx3 not installed")
-    engine = pyttsx3.init()
-    rate = engine.getProperty("rate")
-    engine.setProperty("rate", max(80, rate + rate_delta))
-    engine.save_to_file(text or ".", out_path)
-    engine.runAndWait()
-
-def tts_save(text: str, out_path: str, mode: str, rate_delta: int = 0, voice: str = "alloy"):
-    """Unified TTS wrapper with fallback from OpenAI→gTTS→pyttsx3."""
-    if mode == "openai":
-        try:
-            return tts_save_openai(text, out_path, voice=voice)
-        except Exception:
-            if GTTS_AVAILABLE:
-                return tts_save_gtts(text, out_path)
-            if PYTTSX3_AVAILABLE:
-                return tts_save_pyttsx3(text, out_path, rate_delta=rate_delta)
-            raise
-    elif mode == "gtts":
-        return tts_save_gtts(text, out_path)
-    elif mode == "pyttsx3":
-        return tts_save_pyttsx3(text, out_path, rate_delta=rate_delta)
-    else:
-        raise RuntimeError("Unknown TTS mode")
-
-def make_audio_for_segments(segments: List[Tuple[str, str]], tmpdir: str, tts_mode: str, rate_delta: int = 0, voice: str = "alloy") -> Tuple[str, float]:
-    ext = ".mp3" if tts_mode in ("openai", "gtts") else ".wav"
-    audio_paths = []
-    for idx, (label, text) in enumerate(segments):
-        path = os.path.join(tmpdir, f"seg_{idx:02d}_{label}{ext}")
-        tts_save(text, path, mode=tts_mode, rate_delta=rate_delta, voice=voice)
-        audio_paths.append(path)
-
-    clips = [AudioFileClip(p) for p in audio_paths]
-    full = concatenate_audioclips(clips)
-    out_audio = os.path.join(tmpdir, f"narration{ext}")
-
-    # IMPORTANT: Let MoviePy infer codec from extension to avoid ext-attribute bug
-    full.write_audiofile(out_audio, fps=44100, verbose=False, logger=None)
-    dur = full.duration
-    for c in clips:
-        try:
-            c.close()
-        except Exception:
-            pass
-    return out_audio, dur
+def make_audio_for_segments(segments: List[Tuple[str, str]], tmpdir: str) -> Tuple[Optional[str], float]:
+    """Return (audio_path, duration). If narration disabled or fails, returns (None, 0)."""
+    try:
+        ext = ".mp3"
+        audio_paths = []
+        for idx, (label, text) in enumerate(segments):
+            path = os.path.join(tmpdir, f"seg_{idx:02d}_{label}{ext}")
+            tts_save_gtts(text, path)
+            audio_paths.append(path)
+        clips = [AudioFileClip(p) for p in audio_paths]
+        full = concatenate_audioclips(clips)
+        out_audio = os.path.join(tmpdir, f"narration{ext}")
+        # Let MoviePy infer codec from extension
+        full.write_audiofile(out_audio, fps=44100, verbose=False, logger=None)
+        dur = full.duration
+        for c in clips:
+            try:
+                c.close()
+            except Exception:
+                pass
+        return out_audio, dur
+    except Exception:
+        # If any audio error occurs, fall back to silent video
+        return None, 0.0
 
 # -----------------------------
 # Frame builders
@@ -290,47 +214,10 @@ def render_outro_frame(bg_img: Optional[Image.Image], size=(1080,1920), show_gui
     return img
 
 # -----------------------------
-# OpenAI quiz generation (optional)
+# Streamlit UI (Manual-only)
 # -----------------------------
-def generate_quiz_via_openai(topic: str, difficulty: str) -> Tuple[str, List[str], int, str]:
-    if not OPENAI_AVAILABLE:
-        raise RuntimeError("OpenAI SDK not installed")
-    api_key = _get_openai_api_key()
-    if not api_key:
-        raise RuntimeError("OpenAI not available: no API key found")
-    client = OpenAI(api_key=api_key)
-    sys_prompt = "You are a quiz writer. Return JSON with keys: question, options (4 items), correct_index (0-3), explanation (1-2 sentences)."
-    user_prompt = f"Create one multiple-choice question about '{topic}' at {difficulty} difficulty. Do not add extra keys."
-    resp = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role":"system","content":sys_prompt},
-            {"role":"user","content":user_prompt}
-        ],
-        temperature=0.7,
-    )
-    content = resp.choices[0].message.content
-    import json, re
-    try:
-        j = json.loads(content)
-    except Exception:
-        m = re.search(r"\{.*\}", content, re.S)
-        if not m:
-            raise RuntimeError("OpenAI response not JSON.")
-        j = json.loads(m.group())
-    q = j["question"].strip()
-    opts = [o.strip() for o in j["options"]][:4]
-    ci = int(j["correct_index"])
-    expl = j["explanation"].strip()
-    if len(opts) != 4:
-        raise RuntimeError("OpenAI did not return 4 options.")
-    return q, opts, ci, expl
-
-# -----------------------------
-# Streamlit UI
-# -----------------------------
-st.set_page_config(page_title="🎬 Quiz Video Generator", page_icon="❓", layout="centered")
-st.title("🎬 YouTube Quiz Video Generator (MVP)")
+st.set_page_config(page_title="🎬 Quiz Video Generator (Manual Only)", page_icon="❓", layout="centered")
+st.title("🎬 YouTube Quiz Video Generator — Manual Only")
 
 with st.expander("📋 Title & Meta", expanded=True):
     col1, col2 = st.columns(2)
@@ -343,13 +230,7 @@ with st.expander("📋 Title & Meta", expanded=True):
     bg_file = st.file_uploader("Background Image (optional)", type=["png","jpg","jpeg","webp"])
     show_guides = st.checkbox("Show safe-zone guides (bottom 25% reserved)", value=True)
 
-with st.expander("🧠 Question Source", expanded=True):
-    auto_generate = st.checkbox("Auto-generate using OpenAI", value=False, help="Requires OpenAI key in Secrets or ENV.")
-    topic = st.text_input("Topic (for OpenAI)", value="World Geography")
-    difficulty = st.selectbox("Difficulty", ["easy","medium","hard"], index=1)
-    st.caption("Or fill manually below:")
-
-with st.expander("✍️ Question & Options", expanded=not auto_generate):
+with st.expander("✍️ Question & Options", expanded=True):
     question = st.text_area("Question", value="Which country has the largest land area in the world?")
     optA = st.text_input("Option A", value="Russia")
     optB = st.text_input("Option B", value="Canada")
@@ -358,10 +239,9 @@ with st.expander("✍️ Question & Options", expanded=not auto_generate):
     correct_idx = st.selectbox("Correct Option", options=[0,1,2,3], format_func=lambda i: ["A","B","C","D"][i], index=0)
     explanation = st.text_area("Answer Explanation (1–2 lines)", value="Russia spans Eastern Europe and northern Asia, making it the world's largest country by area.")
 
-with st.expander("🔊 Voice-over (choose mode)", expanded=True):
-    tts_mode = st.selectbox("TTS Mode", options=["openai (cloud)", "gtts (cloud)", "pyttsx3 (local)"], index=0)
-    voice = st.text_input("Voice (OpenAI only)", value="alloy", help="For OpenAI TTS models.")
-    rate_delta = st.slider("Local voice speed (pyttsx3 only)", min_value=-60, max_value=60, value=-10, step=5)
+with st.expander("🔊 Narration (gTTS)", expanded=True):
+    enable_tts = st.checkbox("Enable narration (gTTS)", value=True)
+    st.caption("Cloud-friendly TTS. If it fails, the app will still render a silent video.")
 
 with st.expander("⚙️ Timing & Effects", expanded=True):
     fps = st.slider("FPS", 20, 40, 30, 1)
@@ -375,13 +255,8 @@ with st.expander("⚙️ Timing & Effects", expanded=True):
 
 st.markdown("---")
 with st.expander("🔧 Diagnostics", expanded=False):
-    st.write(f"App build: **{APP_BUILD}**")
-    st.write(f"OpenAI SDK installed: **{OPENAI_AVAILABLE}**")
-    key = _get_openai_api_key()
-    masked = ("..." + key[-4:]) if key else "None"
-    st.write(f"OpenAI key detected: **{key is not None}** ({masked})")
+    st.write(f"Build: **{APP_BUILD}**")
     st.write(f"gTTS available: **{GTTS_AVAILABLE}**")
-    st.write(f"pyttsx3 available: **{PYTTSX3_AVAILABLE}**")
 
 generate = st.button("🎥 Generate Video")
 
@@ -392,13 +267,6 @@ if generate:
         bg_img = None
         if bg_file is not None:
             bg_img = Image.open(bg_file)
-
-        if auto_generate:
-            q, opts, ci, expl = generate_quiz_via_openai(topic, difficulty)
-            question = q
-            optA, optB, optC, optD = opts
-            correct_idx = ci
-            explanation = expl
 
         options = [optA, optB, optC, optD]
 
@@ -411,15 +279,13 @@ if generate:
             ("outro", "Please like, share, and subscribe for more quiz videos."),
         ]
 
-        selected_mode = tts_mode.split()[0]
-        if selected_mode == "openai" and _get_openai_api_key() is None:
-            st.warning("OpenAI API key not found. Falling back to gTTS (cloud). Add OPENAI_API_KEY in Streamlit Secrets to use OpenAI voices.")
-            selected_mode = "gtts"
-
         with tempfile.TemporaryDirectory() as tmpdir:
-            audio_path, total_audio = make_audio_for_segments(
-                segments, tmpdir, tts_mode=selected_mode, rate_delta=rate_delta, voice=voice
-            )
+            # Audio (optional)
+            audio_path = None
+            if enable_tts and GTTS_AVAILABLE:
+                audio_path, _ = make_audio_for_segments(segments, tmpdir)
+                if audio_path is None:
+                    st.warning("Narration failed. Rendering a silent video instead.")
 
             frames: List[Image.Image] = []
 

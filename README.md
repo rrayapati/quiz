@@ -1,80 +1,51 @@
-# ☁️ Streamlit Cloud–Friendly Quiz Video Generator
+# 🎬 Quiz Video Generator — Manual Only (Streamlit)
 
-This version adds **cloud-safe TTS** so it runs on **Streamlit Cloud** without system voices.
-
-## What changed
-- New **TTS Mode** selector:
-  - **openai (cloud)** – recommended (set `OPENAI_API_KEY`)
-  - **gtts (cloud)** – no API key; uses Google TTS
-  - **pyttsx3 (local)** – for laptops/desktops with system voices
-- Audio segments are generated as MP3 for cloud modes and concatenated in-app.
-- Same visuals: title (with Day + Quiz #), background image, typing question, 4 option fade-in, answer + explanation, **"Comment your answer"**, and **Outro**.
-
----
-
-## Deploy on Streamlit Cloud
-
-1. Push `app.py`, `requirements.txt`, `README.md` to GitHub.
-2. On Streamlit Cloud, set **secrets / environment variables**:
-   - For **OpenAI TTS** (recommended):
-     - `OPENAI_API_KEY = sk-...`
-3. Deploy. In the app, choose **TTS Mode → openai (cloud)** (or **gtts (cloud)**).
-
-> If you select `pyttsx3 (local)` on Streamlit Cloud, it will fail due to missing `espeak`. Use **openai** or **gtts** instead.
+Create vertical (9:16) quiz videos with:
+- Title (with **Day** + **Quiz #**)
+- Optional **background image**
+- **Typing-effect** question
+- 4 options with **sequential fade-in**
+- **Answer highlight** + short **explanation**
+- **"Comment your answer"** slide
+- **Outro** slide
+- Optional **narration** using **gTTS** (cloud-friendly)
 
 ---
 
-## Local Run
+## Quickstart
 
+### Local
 ```bash
 python -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 streamlit run app.py
 ```
 
-- On local you can use **pyttsx3** if your OS has voices installed.
-- Or use **openai**/**gtts** like in the cloud.
+### Streamlit Cloud
+1. Push `app.py`, `requirements.txt`, `README.md` to GitHub.
+2. Deploy on Streamlit Cloud (no secrets needed).
+3. If narration fails due to outbound network, uncheck **“Enable narration (gTTS)”** and render a silent video.
 
 ---
 
-## Notes
-- OpenAI TTS models: tries `gpt-4o-mini-tts`, then `tts-1` if needed.
-- gTTS requires internet access but no API key.
-- Output MP4 uses **H.264 + AAC**, ready for YouTube Shorts.
-
-Enjoy! 🎉
-
-
-## Streamlit Secrets Setup
-In Streamlit Cloud, set a secret named `OPENAI_API_KEY` (or `openai_api_key`). The app will read either and pass it to the OpenAI SDK explicitly.
-
+## Controls
+- **Resolution**: 1080×1920 (default) or 720×1280 (vertical).
+- **Safe zones**: bottom **25%** reserved (toggle guide), main content within **8%–70%** of height.
+- **Timing**: FPS, typing speed, fade duration, hold durations for each segment.
+- **Narration**: Toggle on/off. Uses gTTS to generate per-segment MP3, concatenates them, and muxes into MP4.
 
 ---
 
-## Streamlit Secrets Examples
+## Troubleshooting
+- If you see audio-related errors, toggle **Narration** off and render a silent video first.
+- For **FFmpeg** issues locally, install it:
+  - macOS: `brew install ffmpeg`
+  - Ubuntu/Debian: `sudo apt-get install -y ffmpeg`
+  - Windows: install FFmpeg and add it to PATH.
+- We **don’t** pass explicit codecs when writing audio; MoviePy infers them from the file extension to avoid the known `'FFMPEG_AudioWriter' object has no attribute 'ext'` bug.
 
-Any of the following will work:
+---
 
-**Flat key:**
-```toml
-OPENAI_API_KEY = "sk-..."
-```
-
-**alt casing:**
-```toml
-openai_api_key = "sk-..."
-```
-
-**Nested section:**
-```toml
-[openai]
-api_key = "sk-..."
-```
-
-The app auto-detects the key from any of these.
-
-
-### Update (build 2025-09-09 16:45 IST)
-- Fixed MoviePy audio write error by letting MoviePy infer codec from extension (no explicit `codec=`).
-- Added robust OpenAI key detection and safe fallback to gTTS.
+## License
+MIT
